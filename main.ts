@@ -1,4 +1,4 @@
-import {App, Modal, FileView, Workspace, Plugin, WorkspaceLeaf, setIcon, moment, Notice} from 'obsidian';
+import {App, Modal, FileView, Workspace, Plugin, WorkspaceLeaf, setIcon, moment, Notice, TFile} from 'obsidian';
 import * as cryptoSource from './cryptsidian.mjs';
 import sha256 from 'crypto-js/sha256';
 /*
@@ -121,6 +121,39 @@ export default class MyPlugin extends Plugin {
             }
 
         });
+
+        this.registerEvent(this.app.workspace.on('file-open', (file: TFile | null) => {
+            if (file != null) {
+                if(this.settings.encryption){
+                    this.closeLeave(file)
+                    new CryptoModal(this.app, 'Decrypt', this).open();
+                }
+            }
+        }));
+    }
+
+    async closeLeave(file: TFile) {
+        let leaves: WorkspaceLeaf[] = [];
+
+        this.app.workspace.iterateAllLeaves((leaf) => {
+            leaves.push(leaf);
+        });
+
+        const emptyLeaf = async (leaf: WorkspaceLeaf): Promise<void> => {
+            leaf.setViewState({ type: 'empty' });
+        }
+
+        for (const leaf of leaves) {
+            if (leaf != null && leaf.view instanceof FileView) {
+                if (leaf.view.file != null) {
+                    if (leaf.view.file.path == file.path) {
+                        await emptyLeaf(leaf);
+                        leaf.detach();
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     async onunload() {

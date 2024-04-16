@@ -1,4 +1,4 @@
-import {App, Modal, FileView, Workspace, Plugin, WorkspaceLeaf, setIcon, moment} from 'obsidian';
+import {App, Modal, FileView, Workspace, Plugin, WorkspaceLeaf, setIcon, moment, Notice} from 'obsidian';
 import * as cryptoSource from './cryptsidian.mjs';
 import sha256 from 'crypto-js/sha256';
 /*
@@ -10,6 +10,7 @@ import {ALGORITHM, SALT, ENCRYPT, DECRYPT, KEY_LENGTH} from './tmpcryptsidian.js
 */
 
 const SOLID_PASS = 'qBjSbeiu2qDNEq5d';
+
 interface MyPluginSettings {
     mySetting: string;
     encryption: boolean;
@@ -31,6 +32,9 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 export default class MyPlugin extends Plugin {
     settings: MyPluginSettings;
     passwordRibbonBtn: HTMLElement;
+    lastPassword: string;
+    useLastPassword: boolean;
+
     async onload() {
         console.log('loading plugin');
 
@@ -79,7 +83,44 @@ export default class MyPlugin extends Plugin {
 
         });
 
+        this.addCommand({
+            id: 'open-use-last-password',
+            name: 'Open Use Last Password',
 
+            checkCallback: (checking: boolean) => {
+                let leaf = this.app.workspace.activeLeaf;
+                if (leaf) {
+                    if (!checking) {
+                        if (this.lastPassword && this.settings.isLastVerifyPasswordCorrect) {
+                            this.useLastPassword = true
+                            new Notice("Open use last password success")
+                        } else {
+                            new Notice("You need to perform encryption and correct decryption first");
+                        }
+                    }
+                    return true;
+                }
+                return false;
+            }
+
+        });
+
+        this.addCommand({
+            id: 'close-use-last-password',
+            name: 'Close Use Last Password',
+
+            checkCallback: (checking: boolean) => {
+                let leaf = this.app.workspace.activeLeaf;
+                if (leaf) {
+                    if (!checking) {
+                        this.useLastPassword = false
+                    }
+                    return true;
+                }
+                return false;
+            }
+
+        });
     }
 
     async onunload() {
@@ -97,11 +138,67 @@ export default class MyPlugin extends Plugin {
         await this.saveData(this.settings);
     }
 
-    private switchPasswordProtection() {
+    async crypt(password:string,operation:string){
+        // @ts-ignore
+        let vault_dir = this.app.vault.adapter.getBasePath();
+        cryptoSource.setUserSecretKey(password); //derive the secret key via scrypt from user's password
+
+        // close open notes to prevent post-encryption access, which can corrupt files and make them irrecoverable
+        const emptyLeaf = async (leaf: WorkspaceLeaf): Promise<void> => {
+            leaf.setViewState({type: 'empty'});
+        }
+
+        const closeLeaves = async (): Promise<void> => { // we use this function construction to get async/await and keep the right "this"
+            let leaves: WorkspaceLeaf[] = [];
+
+            this.app.workspace.iterateAllLeaves((leaf) => {
+                leaves.push(leaf);
+            });
+
+            for (const leaf of leaves) {
+                if (leaf.view instanceof FileView) {
+                    await emptyLeaf(leaf);
+                    leaf.detach();
+                }
+            }
+        }
+
+        const processFiles = async (): Promise<void> => {
+            await closeLeaves();
+            cryptoSource.fileProcessor(files, operation.toUpperCase());
+        }
+
+        //run the encryption or decryption
+        let files = cryptoSource.getVaultFiles(vault_dir);
+        this.lastPassword = password
+        await processFiles();
+        if (operation.toUpperCase() === 'ENCRYPT') {
+            this.settings.encryption = true
+            this.settings.password = sha256(password + SOLID_PASS).toString();
+            await this.saveSettings()
+            setIcon(this.passwordRibbonBtn, "unlock-keyhole")
+            this.passwordRibbonBtn.ariaLabel = "disable_encryption";
+        } else if (operation.toUpperCase() === 'DECRYPT') {
+            this.settings.encryption = false
+            await this.saveSettings()
+            setIcon(this.passwordRibbonBtn, "lock-keyhole")
+            this.passwordRibbonBtn.ariaLabel = "enable_encryption";
+        }
+    }
+
+    private async switchPasswordProtection() {
         if (this.settings.encryption) {
-            new CryptoModal(this.app, 'Decrypt', this).open();
+            if (this.useLastPassword && this.lastPassword) {
+                await this.crypt(this.lastPassword, 'Decrypt')
+            } else {
+                new CryptoModal(this.app, 'Decrypt', this).open();
+            }
         } else {
-            new CryptoModal(this.app, 'Encrypt', this).open();
+            if (this.useLastPassword && this.lastPassword) {
+                await this.crypt(this.lastPassword, 'Encrypt')
+            } else {
+                new CryptoModal(this.app, 'Encrypt', this).open();
+            }
         }
     }
 }
@@ -121,7 +218,6 @@ class CryptoModal extends Modal {
         // get vault dir
         // @ts-ignore
         let vault_dir = this.app.vault.adapter.getBasePath();
-
         //initiailze an empty DOM object to hold our modal
         let {contentEl} = this;
         contentEl.empty();
@@ -215,13 +311,13 @@ class CryptoModal extends Modal {
                 good_to_go = true;
                 messageMatchEl.hide();
             }
-            if(this.operation.toUpperCase() === 'DECRYPT'){
-                const sha = sha256(pwInputEl.value+SOLID_PASS).toString();
-                if(this.plugin.settings.password === sha) {
+            if (this.operation.toUpperCase() === 'DECRYPT') {
+                const sha = sha256(pwInputEl.value + SOLID_PASS).toString();
+                if (this.plugin.settings.password === sha) {
                     good_to_go = true;
                     messageCorrectEl.hide()
                     this.plugin.settings.isLastVerifyPasswordCorrect = true
-                }else {
+                } else {
                     good_to_go = false
                     messageCorrectEl.show()
                     this.plugin.settings.isLastVerifyPasswordCorrect = false
@@ -244,48 +340,7 @@ class CryptoModal extends Modal {
             // if all checks pass, execute the crypto operation
             if (good_to_go) {
                 this.password = pwConfirmEl.value;
-                cryptoSource.setUserSecretKey(this.password); //derive the secret key via scrypt from user's password
-
-                // close open notes to prevent post-encryption access, which can corrupt files and make them irrecoverable
-                const emptyLeaf = async (leaf: WorkspaceLeaf): Promise<void> => {
-                    leaf.setViewState({type: 'empty'});
-                }
-
-                const closeLeaves = async (): Promise<void> => { // we use this function construction to get async/await and keep the right "this"
-                    let leaves: WorkspaceLeaf[] = [];
-
-                    this.app.workspace.iterateAllLeaves((leaf) => {
-                        leaves.push(leaf);
-                    });
-
-                    for (const leaf of leaves) {
-                        if (leaf.view instanceof FileView) {
-                            await emptyLeaf(leaf);
-                            leaf.detach();
-                        }
-                    }
-                }
-
-                const processFiles = async (): Promise<void> => {
-                    await closeLeaves();
-                    cryptoSource.fileProcessor(files, this.operation.toUpperCase());
-                }
-
-                //run the encryption or decryption
-                let files = cryptoSource.getVaultFiles(vault_dir);
-                await processFiles();
-                if (this.operation.toUpperCase() === 'ENCRYPT') {
-                    this.plugin.settings.encryption = true
-                    this.plugin.settings.password = sha256(pwInputEl.value+SOLID_PASS).toString();
-                    await this.plugin.saveSettings()
-                    setIcon(this.plugin.passwordRibbonBtn, "unlock-keyhole")
-                    this.plugin.passwordRibbonBtn.ariaLabel = "disable_encryption";
-                } else if (this.operation.toUpperCase() === 'DECRYPT') {
-                    this.plugin.settings.encryption = false
-                    await this.plugin.saveSettings()
-                    setIcon(this.plugin.passwordRibbonBtn, "lock-keyhole")
-                    this.plugin.passwordRibbonBtn.ariaLabel = "enable_encryption";
-                }
+                await this.plugin.crypt(pwConfirmEl.value,this.operation)
                 this.close();
             }
         }

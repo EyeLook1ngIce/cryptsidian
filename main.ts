@@ -1,5 +1,6 @@
-import {App, Modal, FileView, Workspace, Plugin, WorkspaceLeaf,setIcon,moment} from 'obsidian';
+import {App, Modal, FileView, Workspace, Plugin, WorkspaceLeaf, setIcon, moment} from 'obsidian';
 import * as cryptoSource from './cryptsidian.mjs';
+import sha256 from 'crypto-js/sha256';
 /*
 // functions we're importing
 import {hasEnoughEntropy, stringSanitizer, setUserSecretKey, keyDeriver, encryptFile, decryptFile, getVaultFiles, fileProcessor, getFileBuffer, openFile} from './tmpcryptsidian.mjs';
@@ -8,16 +9,23 @@ import {hasEnoughEntropy, stringSanitizer, setUserSecretKey, keyDeriver, encrypt
 import {ALGORITHM, SALT, ENCRYPT, DECRYPT, KEY_LENGTH} from './tmpcryptsidian.js';
 */
 
+const SOLID_PASS = 'qBjSbeiu2qDNEq5d';
 interface MyPluginSettings {
     mySetting: string;
     encryption: boolean;
-    dataSaveTime: string
+    dataSaveTime: string;
+    isLastVerifyPasswordCorrect: boolean;
+    timeOnUnload: moment.Moment | number;
+    password: string;
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
     mySetting: 'default',
     encryption: false,
-    dataSaveTime: '1970-01-01 00:00:00'
+    dataSaveTime: '1970-01-01 00:00:00',
+    isLastVerifyPasswordCorrect: false,
+    timeOnUnload: 0,
+    password: ''
 }
 
 export default class MyPlugin extends Plugin {
@@ -28,11 +36,11 @@ export default class MyPlugin extends Plugin {
 
         await this.loadSettings();
 
-        if(this.settings.encryption){
+        if (this.settings.encryption) {
             this.passwordRibbonBtn = this.addRibbonIcon('unlock-keyhole', "disable_encryption", (evt: MouseEvent) => {
                 this.switchPasswordProtection();
             });
-        }else {
+        } else {
             this.passwordRibbonBtn = this.addRibbonIcon('lock-keyhole', "enable_encryption", (evt: MouseEvent) => {
                 this.switchPasswordProtection();
             });
@@ -45,7 +53,7 @@ export default class MyPlugin extends Plugin {
                 let leaf = this.app.workspace.activeLeaf;
                 if (leaf) {
                     if (!checking) {
-                        new CryptoModal(this.app, 'Encrypt',this).open();
+                        new CryptoModal(this.app, 'Encrypt', this).open();
                     }
                     return true;
                 }
@@ -62,7 +70,7 @@ export default class MyPlugin extends Plugin {
                 let leaf = this.app.workspace.activeLeaf;
                 if (leaf) {
                     if (!checking) {
-                        new CryptoModal(this.app, 'Decrypt',this).open();
+                        new CryptoModal(this.app, 'Decrypt', this).open();
                     }
                     return true;
                 }
@@ -70,10 +78,14 @@ export default class MyPlugin extends Plugin {
             }
 
         });
+
+
     }
 
     async onunload() {
         console.log('unloading plugin');
+        this.settings.isLastVerifyPasswordCorrect = false
+        this.settings.timeOnUnload = moment();
         await this.saveSettings();
     }
 
@@ -86,10 +98,10 @@ export default class MyPlugin extends Plugin {
     }
 
     private switchPasswordProtection() {
-        if(this.settings.encryption){
-            new CryptoModal(this.app, 'Decrypt',this).open();
-        }else {
-            new CryptoModal(this.app, 'Encrypt',this).open();
+        if (this.settings.encryption) {
+            new CryptoModal(this.app, 'Decrypt', this).open();
+        } else {
+            new CryptoModal(this.app, 'Encrypt', this).open();
         }
     }
 }
@@ -99,7 +111,7 @@ class CryptoModal extends Modal {
     operation: string = null;
     plugin: MyPlugin
 
-    constructor(app: App, operation: string,plugin: MyPlugin) {
+    constructor(app: App, operation: string, plugin: MyPlugin) {
         super(app);
         this.operation = operation;
         this.plugin = plugin
@@ -170,6 +182,12 @@ class CryptoModal extends Modal {
         messageEl.style.marginTop = '1em';
         messageEl.hide();
 
+        const messageCorrectEl = contentEl.createDiv();
+        messageCorrectEl.style.marginTop = '1em';
+        messageCorrectEl.style.color = 'red';
+        messageCorrectEl.setText('Passwords not correct');
+        messageCorrectEl.hide();
+
         // check the input
         // @ts-ignore
         const pwChecker = async (ev) => { // we use an arrow function to preserve access to the "this" we want
@@ -197,7 +215,19 @@ class CryptoModal extends Modal {
                 good_to_go = true;
                 messageMatchEl.hide();
             }
-
+            if(this.operation.toUpperCase() === 'DECRYPT'){
+                const sha = sha256(pwInputEl.value+SOLID_PASS).toString();
+                if(this.plugin.settings.password === sha) {
+                    good_to_go = true;
+                    messageCorrectEl.hide()
+                    this.plugin.settings.isLastVerifyPasswordCorrect = true
+                }else {
+                    good_to_go = false
+                    messageCorrectEl.show()
+                    this.plugin.settings.isLastVerifyPasswordCorrect = false
+                }
+                await this.plugin.saveSettings()
+            }
             // is the user's password strong enough for crypto?
             if (good_to_go) {
                 try {
@@ -244,16 +274,16 @@ class CryptoModal extends Modal {
                 //run the encryption or decryption
                 let files = cryptoSource.getVaultFiles(vault_dir);
                 await processFiles();
-                if(this.operation.toUpperCase()==='ENCRYPT'){
+                if (this.operation.toUpperCase() === 'ENCRYPT') {
                     this.plugin.settings.encryption = true
+                    this.plugin.settings.password = sha256(pwInputEl.value+SOLID_PASS).toString();
                     await this.plugin.saveSettings()
-                    setIcon(this.plugin.passwordRibbonBtn,"unlock-keyhole")
+                    setIcon(this.plugin.passwordRibbonBtn, "unlock-keyhole")
                     this.plugin.passwordRibbonBtn.ariaLabel = "disable_encryption";
-                }
-                else if(this.operation.toUpperCase()==='DECRYPT'){
+                } else if (this.operation.toUpperCase() === 'DECRYPT') {
                     this.plugin.settings.encryption = false
                     await this.plugin.saveSettings()
-                    setIcon(this.plugin.passwordRibbonBtn,"lock-keyhole")
+                    setIcon(this.plugin.passwordRibbonBtn, "lock-keyhole")
                     this.plugin.passwordRibbonBtn.ariaLabel = "enable_encryption";
                 }
                 this.close();
